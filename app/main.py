@@ -3,6 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes import auth, users, data, waitlist, payments
 
 app = FastAPI(title="NEXORA API", version="1.0.0")
+from app.models.database import create_tables
+
+@app.on_event("startup")
+async def startup():
+    create_tables()
 
 app.add_middleware(
     CORSMiddleware,
