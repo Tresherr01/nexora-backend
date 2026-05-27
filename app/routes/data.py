@@ -37,7 +37,6 @@ async def upload_file(
     if len(df) > limit:
         raise HTTPException(403, f"Ваш тариф поддерживает до {limit:,} строк. Обновите план.")
 
-    # Сохранить файл
     save_path = f"{UPLOAD_DIR}/{current_user.id}_{file.filename}"
     with open(save_path, "wb") as f:
         f.write(content)
@@ -72,7 +71,82 @@ def list_datasets(db: Session = Depends(get_db), current_user: User = Depends(ge
     return [{"id": d.id, "name": d.name, "rows": d.rows, "columns": d.columns, "created_at": d.created_at} for d in datasets]
 
 
-# ── AI Chat ───────────────────────────────────────────────────────────────────
+# ── AI Analyze (used by dashboard) ───────────────────────────────────────────
+
+class AnalyzeIn(BaseModel):
+    message: str
+    csv_sample: list[dict] = []
+    headers: list[str] = []
+    num_cols: list[str] = []
+    txt_cols: list[str] = []
+    stats_text: str = ""
+    total_rows: int = 0
+
+@router.post("/analyze")
+async def analyze(
+    body: AnalyzeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Проверить лимит AI-вопросов
+    limit = PLAN_LIMITS[current_user.plan]["ai_questions"]
+    used = db.query(ChatMessage).filter(
+        ChatMessage.user_id == current_user.id,
+        ChatMessage.role == "user"
+    ).count()
+    if used >= limit:
+        raise HTTPException(403, f"Вы исчерпали {limit} AI-вопросов на этом тарифе. Обновите план.")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI-аналитик не настроен. Администратор должен добавить ANTHROPIC_API_KEY.")
+
+    system_prompt = f"""Ты NEXORA AI — умный бизнес-аналитик. Отвечай кратко и конкретно, давай инсайты с числами.
+
+Если вопрос требует вычислений — напиши JavaScript функцию в блоке ```javascript ... ``` вот так:
+```javascript
+function analyze(csvData, csvHeaders) {{
+  // csvData — массив объектов, csvHeaders — массив названий колонок
+  // Верни строку с результатом
+  return "результат";
+}}
+```
+Функция выполнится в браузере пользователя на полных данных.
+
+Если вопрос аналитический (без вычислений) — отвечай обычным текстом.
+
+ДАННЫЕ:
+Всего строк: {body.total_rows}
+Колонки: {', '.join(body.headers)}
+Числовые колонки: {', '.join(body.num_cols) or 'нет'}
+Текстовые колонки: {', '.join(body.txt_cols) or 'нет'}
+
+Статистика:
+{body.stats_text or 'нет данных'}
+
+Первые строки данных:
+{json.dumps(body.csv_sample[:5], ensure_ascii=False, indent=2)}"""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": body.message}],
+    )
+
+    answer = response.content[0].text
+    tokens = response.usage.input_tokens + response.usage.output_tokens
+
+    # Сохранить в историю
+    db.add(ChatMessage(user_id=current_user.id, dataset_id=None, role="user",    content=body.message, tokens_used=0))
+    db.add(ChatMessage(user_id=current_user.id, dataset_id=None, role="assistant", content=answer, tokens_used=tokens))
+    db.commit()
+
+    return {"answer": answer, "tokens_used": tokens}
+
+
+# ── AI Chat (legacy — по dataset_id) ─────────────────────────────────────────
 
 class ChatIn(BaseModel):
     dataset_id: str
@@ -85,7 +159,6 @@ async def chat_with_data(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # Проверить лимит вопросов
     limit = PLAN_LIMITS[current_user.plan]["ai_questions"]
     used = db.query(ChatMessage).filter(
         ChatMessage.user_id == current_user.id,
@@ -94,7 +167,6 @@ async def chat_with_data(
     if used >= limit:
         raise HTTPException(403, f"Вы исчерпали {limit} AI-вопросов на этом тарифе. Обновите план.")
 
-    # Загрузить датасет
     dataset = db.query(Dataset).filter(
         Dataset.id == body.dataset_id,
         Dataset.user_id == current_user.id
@@ -103,13 +175,10 @@ async def chat_with_data(
         raise HTTPException(404, "Датасет не найден")
 
     df = pd.read_csv(dataset.storage_path)
-
-    # Статистика
     num_cols = df.select_dtypes(include="number").columns.tolist()
     stats = df[num_cols].describe().to_string() if num_cols else "Числовых колонок нет"
 
-    system_prompt = f"""Ты NEXORA AI — умный бизнес-аналитик. Отвечай на русском языке, кратко и конкретно.
-Давай инсайты с числами. Выделяй паттерны. Будь как умный коллега, не как скучный отчёт.
+    system_prompt = f"""Ты NEXORA AI — умный бизнес-аналитик. Отвечай кратко и конкретно.
 
 ДАТАСЕТ: {dataset.name}
 Строк: {len(df)}, Колонок: {len(df.columns)}
@@ -122,11 +191,14 @@ async def chat_with_data(
 {df.head(10).to_json(orient='records', force_ascii=False)}
 """
 
-    # Собрать историю
-    messages = body.history[-10:]  # Последние 10 сообщений для контекста
+    messages = body.history[-10:]
     messages.append({"role": "user", "content": body.message})
 
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI не настроен.")
+
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
@@ -137,9 +209,8 @@ async def chat_with_data(
     answer = response.content[0].text
     tokens = response.usage.input_tokens + response.usage.output_tokens
 
-    # Сохранить в историю
     db.add(ChatMessage(user_id=current_user.id, dataset_id=dataset.id, role="user",    content=body.message, tokens_used=0))
-    db.add(ChatMessage(user_id=current_user.id, dataset_id=dataset.id, role="assistant", content=answer,       tokens_used=tokens))
+    db.add(ChatMessage(user_id=current_user.id, dataset_id=dataset.id, role="assistant", content=answer, tokens_used=tokens))
     db.commit()
 
     return {"answer": answer, "tokens_used": tokens}
