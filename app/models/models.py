@@ -36,7 +36,7 @@ class Dataset(Base):
     rows         = Column(Integer, default=0)
     columns      = Column(Integer, default=0)
     size_bytes   = Column(Integer, default=0)
-    storage_path = Column(String)           # путь к файлу на диске / S3
+    storage_path = Column(String)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
     owner        = relationship("User", back_populates="datasets")
@@ -48,7 +48,7 @@ class Dashboard(Base):
     user_id      = Column(String, ForeignKey("users.id"), nullable=False)
     dataset_id   = Column(String, ForeignKey("datasets.id"))
     title        = Column(String, nullable=False)
-    config       = Column(Text)   # JSON: chart configs
+    config       = Column(Text)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
     owner        = relationship("User", back_populates="dashboards")
@@ -58,7 +58,7 @@ class WaitlistEntry(Base):
 
     id           = Column(String, primary_key=True, default=gen_id)
     email        = Column(String, unique=True, nullable=False, index=True)
-    source       = Column(String, default="landing")   # откуда пришёл
+    source       = Column(String, default="landing")
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
 class ChatMessage(Base):
@@ -75,10 +75,10 @@ class ChatMessage(Base):
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
-    id               = Column(String, primary_key=True, default=gen_id)
-    user_id          = Column(String, ForeignKey("users.id"), unique=True)
-    plan             = Column(Enum(PlanType))
-    stripe_sub_id    = Column(String)
-    status           = Column(String)   # active | canceled | past_due
+    id                 = Column(String, primary_key=True, default=gen_id)
+    user_id            = Column(String, ForeignKey("users.id"), unique=True)
+    plan               = Column(Enum(PlanType))
+    paddle_sub_id      = Column(String)   # ← было stripe_sub_id
+    status             = Column(String)   # active | canceled | past_due
     current_period_end = Column(DateTime(timezone=True))
-    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+    created_at         = Column(DateTime(timezone=True), server_default=func.now())
